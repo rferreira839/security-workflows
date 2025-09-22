@@ -1,1 +1,103 @@
-inicial
+name: reusable-trivy
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Nome base da imagem (sem tag); ex: ghcr.io/ORG/projeto"
+        required: true
+        type: string
+      enforce_on_pr:
+        description: "Falhar PR se a IMAGEM tiver HIGH/CRITICAL"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ hashFiles('**/lockfiles-go-here-if-any') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      # Dockerfile misconfig → SARIF
+      - name: Trivy Dockerfile (misconfig)
+        run: trivy config --format sarif --output trivy-dockerfile.sarif Dockerfile || true
+
+      - name: Upload SARIF (Dockerfile)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-dockerfile.sarif
+          category: trivy-dockerfile
+
+      # Filesystem → vuln/secret/misconfig → SARIF
+      - name: Trivy Filesystem (repo)
+        run: |
+          trivy fs --scanners vuln,secret,misconfig \
+            --format sarif --output trivy-fs.sarif . || true
+
+      - name: Upload SARIF (Filesystem)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      # Build da imagem local
+      - name: Build image (local only)
+        env:
+          IMAGE: ${{ inputs.image_name }}:trivy-${{ github.sha }}
+        run: docker build -t "$IMAGE" .
+
+      # Image scan → SARIF + resumo
+      - name: Trivy Image (vuln+misconfig+secret)
+        id: trivy_image
+        continue-on-error: true
+        env:
+          IMAGE: ${{ inputs.image_name }}:trivy-${{ github.sha }}
+        run: |
+          trivy image --scanners vuln,misconfig,secret \
+            --severity HIGH,CRITICAL \
+            --format sarif --output trivy-image.sarif "$IMAGE"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --format table "$IMAGE" | tee trivy-image.txt
+
+      - name: Upload SARIF (Image)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Summary (Image scan)
+        if: always()
+        run: |
+          echo '### Trivy Image (HIGH/CRITICAL) Summary' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat trivy-image.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Enforce on PRs (fail if HIGH/CRITICAL on image)
+        if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' }}
+        env:
+          IMAGE: ${{ inputs.image_name }}:trivy-${{ github.sha }}
+        run: trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
