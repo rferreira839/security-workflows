@@ -20,6 +20,9 @@ permissions:
 jobs:
   trivy:
     runs-on: ubuntu-latest
+    env:
+      TRIVY_TIMEOUT: 10m
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,10 +40,11 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          trivy --version
 
       # Dockerfile misconfig → SARIF
       - name: Trivy Dockerfile (misconfig)
-        run: trivy config --format sarif --output trivy-dockerfile.sarif Dockerfile || true
+        run: trivy config --no-progress --format sarif --output trivy-dockerfile.sarif Dockerfile || true
 
       - name: Upload SARIF (Dockerfile)
         if: always()
@@ -52,7 +56,7 @@ jobs:
       # Filesystem → vuln/secret/misconfig → SARIF
       - name: Trivy Filesystem (repo)
         run: |
-          trivy fs --scanners vuln,secret,misconfig \
+          trivy fs --no-progress --scanners vuln,secret,misconfig \
             --format sarif --output trivy-fs.sarif . || true
 
       - name: Upload SARIF (Filesystem)
@@ -75,10 +79,10 @@ jobs:
         env:
           IMAGE: ${{ inputs.image_name }}:trivy-${{ github.sha }}
         run: |
-          trivy image --scanners vuln,misconfig,secret \
+          trivy image --no-progress --scanners vuln,misconfig,secret \
             --severity HIGH,CRITICAL \
             --format sarif --output trivy-image.sarif "$IMAGE"
-          trivy image --scanners vuln --severity HIGH,CRITICAL --format table "$IMAGE" | tee trivy-image.txt
+          trivy image --no-progress --scanners vuln --severity HIGH,CRITICAL --format table "$IMAGE" | tee trivy-image.txt
 
       - name: Upload SARIF (Image)
         if: always()
@@ -96,8 +100,9 @@ jobs:
           cat trivy-image.txt >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      # Gate de PR: falha somente em pull_request se houver HIGH/CRITICAL na imagem
       - name: Enforce on PRs (fail if HIGH/CRITICAL on image)
         if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' }}
         env:
           IMAGE: ${{ inputs.image_name }}:trivy-${{ github.sha }}
-        run: trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
+        run: trivy image --no-progress --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
