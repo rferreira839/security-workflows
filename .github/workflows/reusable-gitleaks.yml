@@ -4,40 +4,66 @@ on:
   workflow_call:
     inputs:
       enforce_on_pr:
-        description: "Falhar PR se houver vazamentos"
+        description: "Falhar PR se houver vazamentos (segredos) detectados"
         type: boolean
         default: true
         required: false
 
 permissions:
   contents: read
-  pull-requests: write
+  security-events: write   # necessário para upload de SARIF ao Code Scanning
 
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # (Opcional, para depuração rápida)
-      # - name: Assert GITHUB_TOKEN exists
-      #   run: |
-      #     if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
-      #       echo "GITHUB_TOKEN não está disponível no called workflow"; exit 1
-      #     fi
-
-      - name: Run Gitleaks (v2)
-        id: gl
-        uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GITLEAKS_CONFIG: .github/gitleaks.toml  # se quiser usar config custom
-
-      - name: Enforce on PR (fail if leaks)
-        if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' && steps.gl.outcome == 'failure' }}
+      # Instala o CLI via install.sh (branch main); se falhar, baixa a release como fallback
+      - name: Install Gitleaks CLI
         run: |
-          echo "Gitleaks encontrou vazamentos. Falhando o PR."
+          set -e
+          if curl -fsSL https://raw.githubusercontent.com/gitleaks/gitleaks/main/install.sh -o /tmp/install.sh; then
+            bash /tmp/install.sh -b /usr/local/bin
+          else
+            echo "install.sh indisponível; usando fallback por release fixa"
+            GITLEAKS_VERSION="8.24.3"
+            curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+            sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+            sudo chmod +x /usr/local/bin/gitleaks
+          fi
+          gitleaks version
+
+      # Executa o scan, sempre gera SARIF e captura o exit code
+      - name: Run Gitleaks (generate SARIF)
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          set +e
+          gitleaks detect \
+            --source . \
+            --redact \
+            --report-format sarif \
+            --report-path gitleaks.sarif
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          set -e
+
+      # Publica no GitHub Security → Code scanning
+      - name: Upload SARIF (Gitleaks)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+      # Gate: falha o PR se houve findings (apenas em pull_request, e se enforce_on_pr = true)
+      - name: Enforce on PRs (fail if secrets found)
+        if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' && steps.gitleaks.outputs.exit_code == '1' }}
+        run: |
+          echo "Gitleaks encontrou segredos neste PR." >&2
           exit 1
