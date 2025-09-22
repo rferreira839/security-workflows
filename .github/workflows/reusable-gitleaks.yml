@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       enforce_on_pr:
-        description: "Falhar PR se houver vazamentos"
+        description: "Falhar PR se houver vazamentos "
         type: boolean
         default: true
         required: false
