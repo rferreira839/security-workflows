@@ -1,17 +1,17 @@
-name: reusable-gitleaks
+name: Reusable Gitleaks
 
 on:
   workflow_call:
     inputs:
       enforce_on_pr:
-        description: "Falhar PR se houver vazamentos "
+        description: "Falhar PR se houver vazamentos"
         type: boolean
         default: true
         required: false
 
 permissions:
   contents: read
-  pull-requests: write   # permite comentar no PR
+  pull-requests: write
 
 jobs:
   gitleaks:
@@ -19,17 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # necessário p/ comparar base/head em PRs
+          fetch-depth: 0
 
-      # ⚠️ NADA de "with: args". Use env conforme o v2 exige.
-      - name: Run Gitleaks
+      # (Opcional, para depuração rápida)
+      # - name: Assert GITHUB_TOKEN exists
+      #   run: |
+      #     if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
+      #       echo "GITHUB_TOKEN não está disponível no called workflow"; exit 1
+      #     fi
+
+      - name: Run Gitleaks (v2)
         id: gl
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true            # deixamos passar e decidimos após
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}        # OBRIGATÓRIO no v2
-          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # só p/ orgs
-          # GITLEAKS_CONFIG: .github/gitleaks.toml             # opcional
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_CONFIG: .github/gitleaks.toml  # se quiser usar config custom
 
       - name: Enforce on PR (fail if leaks)
         if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' && steps.gl.outcome == 'failure' }}
