@@ -4,51 +4,35 @@ on:
   workflow_call:
     inputs:
       enforce_on_pr:
-        description: "Falhar PR se segredos forem encontrados"
-        required: false
+        description: "Falhar PR se houver vazamentos"
         type: boolean
         default: true
+        required: false
 
 permissions:
   contents: read
-  security-events: write
+  pull-requests: write   # permite comentar no PR
 
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # necessário p/ comparar base/head em PRs
 
-      - name: Install Gitleaks CLI
+      # ⚠️ NADA de "with: args". Use env conforme o v2 exige.
+      - name: Run Gitleaks
+        id: gl
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true            # deixamos passar e decidimos após
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}        # OBRIGATÓRIO no v2
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # só p/ orgs
+          # GITLEAKS_CONFIG: .github/gitleaks.toml             # opcional
+
+      - name: Enforce on PR (fail if leaks)
+        if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' && steps.gl.outcome == 'failure' }}
         run: |
-          curl -sSL https://raw.githubusercontent.com/gitleaks/gitleaks/master/install.sh | bash -s -- -b /usr/local/bin
-          gitleaks version
-
-      - name: Run Gitleaks (generate SARIF)
-        id: gitleaks
-        continue-on-error: true
-        run: |
-          set +e
-          gitleaks detect \
-            --source . \
-            --redact \
-            --report-format sarif \
-            --report-path gitleaks.sarif
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
-          set -e
-
-      - name: Upload SARIF (Gitleaks)
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: gitleaks.sarif
-          category: gitleaks
-
-      - name: Enforce on PRs (fail if secrets found)
-        if: ${{ inputs.enforce_on_pr && github.event_name == 'pull_request' && steps.gitleaks.outputs.exit_code == '1' }}
-        run: |
-          echo "Gitleaks encontrou segredos neste PR." >&2
+          echo "Gitleaks encontrou vazamentos. Falhando o PR."
           exit 1
